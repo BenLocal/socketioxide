@@ -3,6 +3,7 @@ use std::{borrow::Cow, sync::Arc, time::Duration};
 use engineioxide::{
     config::{EngineIoConfig, EngineIoConfigBuilder},
     service::NotFoundService,
+    sid::Sid,
     TransportType,
 };
 use futures::stream::BoxStream;
@@ -723,6 +724,12 @@ impl<A: Adapter> SocketIo<A> {
         self.get_default_op().leave(rooms)
     }
 
+    /// Gets a [`SocketRef`] by the specified [`Sid`].
+    #[inline]
+    pub fn get_socket(&self, sid: Sid) -> Option<SocketRef<A>> {
+        self.get_default_op().get_socket(sid)
+    }
+
     /// Returns a new operator on the given namespace
     #[inline(always)]
     fn get_op(&self, path: &str) -> Option<Operators<A>> {
@@ -772,6 +779,24 @@ mod tests {
         io.ns("test", || {});
         assert!(io.get_op("test").is_some());
         assert!(io.get_op("test2").is_none());
+    }
+
+    #[test]
+    fn get_socket_by_sid() {
+        use engineioxide::Socket;
+        let sid = Sid::new();
+        let (_, io) = SocketIo::builder().build_svc();
+        io.ns("/", || {});
+
+        let socket = Socket::new_dummy(sid, Box::new(|_, _| {})).into();
+        let config = SocketIoConfig::default().into();
+        io.0.get_ns("/")
+            .unwrap()
+            .connect(sid, socket, None, config)
+            .unwrap();
+
+        assert!(io.get_socket(sid).is_some());
+        assert!(io.get_socket(Sid::new()).is_none());
     }
 
     #[test]

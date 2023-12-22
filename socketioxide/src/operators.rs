@@ -393,6 +393,11 @@ impl<A: Adapter> Operators<A> {
         self.ns.adapter.disconnect_socket(self.opts)
     }
 
+    /// Gets a [`SocketRef`] by the specified [`Sid`].
+    pub fn get_socket(&self, sid: Sid) -> Option<SocketRef<A>> {
+        self.ns.get_socket(sid).map(SocketRef::new).ok()
+    }
+
     /// Makes all sockets selected with the previous operators join the given room(s).
     ///
     /// ### Example
