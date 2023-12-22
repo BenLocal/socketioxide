@@ -289,7 +289,32 @@ impl<A: Adapter> Operators<A> {
         event: impl Into<Cow<'static, str>>,
         data: impl serde::Serialize,
     ) -> Result<(), BroadcastError> {
-        let packet = self.get_packet(event, data)?;
+        let packet = self.get_packet(event, Some(data))?;
+        if let Err(e) = self.ns.adapter.broadcast(packet, self.opts) {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("broadcast error: {e:?}");
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Emits a message to all sockets selected with the previous operators.
+    /// #### Example
+    /// ```
+    /// # use socketioxide::{SocketIo, extract::*};
+    /// # use serde_json::Value;
+    /// let (_, io) = SocketIo::new_svc();
+    /// io.ns("/", |socket: SocketRef| {
+    ///     socket.on("test", |socket: SocketRef, Data::<Value>(data), Bin(bin)| async move {
+    ///         // Emit a test message in the room1 and room3 rooms, except for the room2 room with the binary payload received
+    ///         socket.to("room1").to("room3").except("room2").bin(bin).emit("test", data);
+    ///     });
+    /// });
+    pub fn emit_empty(
+        mut self,
+        event: impl Into<Cow<'static, str>>,
+    ) -> Result<(), BroadcastError> {
+        let packet = self.get_packet(event, None::<String>)?;
         if let Err(e) = self.ns.adapter.broadcast(packet, self.opts) {
             #[cfg(feature = "tracing")]
             tracing::debug!("broadcast error: {e:?}");
@@ -327,7 +352,7 @@ impl<A: Adapter> Operators<A> {
         event: impl Into<Cow<'static, str>>,
         data: impl serde::Serialize,
     ) -> Result<BoxStream<'static, Result<AckResponse<V>, AckError>>, BroadcastError> {
-        let packet = self.get_packet(event, data)?;
+        let packet = self.get_packet(event, Some(data))?;
         self.ns.adapter.broadcast_with_ack(packet, self.opts)
     }
 
@@ -404,15 +429,19 @@ impl<A: Adapter> Operators<A> {
     fn get_packet(
         &mut self,
         event: impl Into<Cow<'static, str>>,
-        data: impl serde::Serialize,
+        data: Option<impl serde::Serialize>,
     ) -> Result<Packet<'static>, serde_json::Error> {
         let ns = self.ns.path.clone();
-        let data = serde_json::to_value(data)?;
+
+        let data = match data {
+            Some(v) => Some(serde_json::to_value(v)?),
+            None => None
+        };
         let packet = if self.binary.is_empty() {
-            Packet::event(ns, event.into(), Some(data))
+            Packet::event(ns, event.into(), data)
         } else {
             let binary = std::mem::take(&mut self.binary);
-            Packet::bin_event(ns, event.into(), Some(data), binary)
+            Packet::bin_event(ns, event.into(), data, binary)
         };
         Ok(packet)
     }

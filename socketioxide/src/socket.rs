@@ -282,6 +282,36 @@ impl<A: Adapter> Socket<A> {
         Ok(())
     }
 
+    /// Emits a message to the client
+    /// ## Errors
+    /// * If the data cannot be serialized to JSON, a [`SendError::Serialize`] is returned.
+    /// * If the packet buffer is full, a [`SendError::InternalChannelFull`] is returned.
+    /// See [`SocketIoBuilder::max_buffer_size`](crate::SocketIoBuilder) option for more infos on internal buffer config
+    /// ## Example
+    /// ```
+    /// # use socketioxide::{SocketIo, extract::*};
+    /// # use serde_json::Value;
+    /// # use std::sync::Arc;
+    /// let (_, io) = SocketIo::new_svc();
+    /// io.ns("/", |socket: SocketRef| {
+    ///     socket.on("test", |socket: SocketRef, Data::<Value>(data)| async move {
+    ///         // Emit a test message to the client
+    ///         socket.emit("test").ok();
+    ///     });
+    /// });
+    /// ```
+    pub fn emit_empty( &self,
+        event: impl Into<Cow<'static, str>>,
+    ) -> Result<(), SendError> {
+        let ns = self.ns();
+        if let Err(e) = self.send(Packet::event(ns, event.into(), None)) {
+            #[cfg(feature = "tracing")]
+            tracing::debug!("sending error during emit message: {e:?}");
+            return Err(e);
+        }
+        Ok(())
+    }
+
     /// Emits a message to the client and wait for acknowledgement.
     ///
     /// The acknowledgement has a timeout specified in the config (5s by default)
