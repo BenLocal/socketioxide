@@ -274,7 +274,7 @@ impl<A: Adapter> Socket<A> {
     ) -> Result<(), SendError> {
         let ns = self.ns();
         let data = serde_json::to_value(data)?;
-        if let Err(e) = self.send(Packet::event(ns, event.into(), data)) {
+        if let Err(e) = self.send(Packet::event(ns, event.into(), Some(data))) {
             #[cfg(feature = "tracing")]
             tracing::debug!("sending error during emit message: {e:?}");
             return Err(e);
@@ -317,7 +317,7 @@ impl<A: Adapter> Socket<A> {
     {
         let ns = self.ns();
         let data = serde_json::to_value(data)?;
-        let packet = Packet::event(Cow::Borrowed(ns), event.into(), data);
+        let packet = Packet::event(Cow::Borrowed(ns), event.into(), Some(data));
 
         self.send_with_ack(packet, None).await
     }
@@ -595,7 +595,7 @@ impl<A: Adapter> Socket<A> {
     // Receives data from client:
     pub(crate) fn recv(self: Arc<Self>, packet: PacketData<'_>) -> Result<(), Error> {
         match packet {
-            PacketData::Event(e, data, ack) => self.recv_event(&e, data, ack),
+            PacketData::Event(e, data, ack) => self.recv_event(&e, data.map_or(Value::Null, |f|f), ack),
             PacketData::EventAck(data, ack_id) => self.recv_ack(data, ack_id),
             PacketData::BinaryEvent(e, packet, ack) => self.recv_bin_event(&e, packet, ack),
             PacketData::BinaryAck(packet, ack) => self.recv_bin_ack(packet, ack),
@@ -659,7 +659,7 @@ impl<A: Adapter> Socket<A> {
         ack: Option<i64>,
     ) -> Result<(), Error> {
         if let Some(handler) = self.message_handlers.read().unwrap().get(e) {
-            handler.call(self.clone(), packet.data, packet.bin, ack);
+            handler.call(self.clone(), packet.data.map_or(Value::Null, |x|x), packet.bin, ack);
         }
         Ok(())
     }
@@ -678,7 +678,7 @@ impl<A: Adapter> Socket<A> {
     fn recv_bin_ack(self: Arc<Self>, packet: BinaryPacket, ack: i64) -> Result<(), Error> {
         if let Some(tx) = self.ack_message.lock().unwrap().remove(&ack) {
             let res = AckResponse {
-                data: packet.data,
+                data: packet.data.map_or(Value::Null, |x| x),
                 binary: packet.bin,
             };
             tx.send(res).ok();

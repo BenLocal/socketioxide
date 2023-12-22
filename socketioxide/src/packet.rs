@@ -75,7 +75,7 @@ impl<'a> Packet<'a> {
     }
 
     /// Create an event packet for the given namespace
-    pub fn event(ns: impl Into<Cow<'a, str>>, e: impl Into<Cow<'a, str>>, data: Value) -> Self {
+    pub fn event(ns: impl Into<Cow<'a, str>>, e: impl Into<Cow<'a, str>>, data: Option<Value>) -> Self {
         Self {
             inner: PacketData::Event(e.into(), data, None),
             ns: ns.into(),
@@ -86,7 +86,7 @@ impl<'a> Packet<'a> {
     pub fn bin_event(
         ns: impl Into<Cow<'a, str>>,
         e: impl Into<Cow<'a, str>>,
-        data: Value,
+        data: Option<Value>,
         bin: Vec<Vec<u8>>,
     ) -> Self {
         debug_assert!(!bin.is_empty());
@@ -109,7 +109,7 @@ impl<'a> Packet<'a> {
     /// Create a binary ack packet for the given namespace
     pub fn bin_ack(ns: &'a str, data: Value, bin: Vec<Vec<u8>>, ack: i64) -> Self {
         debug_assert!(!bin.is_empty());
-        let packet = BinaryPacket::outgoing(data, bin);
+        let packet = BinaryPacket::outgoing(Some(data), bin);
         Self {
             inner: PacketData::BinaryAck(packet, ack),
             ns: Cow::Borrowed(ns),
@@ -181,7 +181,7 @@ pub enum PacketData<'a> {
     /// Disconnect packet, used to disconnect from a namespace
     Disconnect,
     /// Event packet with optional ack id, to request an ack from the other side
-    Event(Cow<'a, str>, Value, Option<i64>),
+    Event(Cow<'a, str>, Option<Value>, Option<i64>),
     /// Event ack packet, to acknowledge an event
     EventAck(Value, i64),
     /// Connect error packet, sent when the namespace is invalid
@@ -196,7 +196,7 @@ pub enum PacketData<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryPacket {
     /// Data related to the packet
-    pub data: Value,
+    pub data: Option<Value>,
     /// Binary payload
     pub bin: Vec<Vec<u8>>,
     /// The number of expected payloads (used when receiving data)
@@ -260,17 +260,18 @@ impl BinaryPacket {
         };
 
         Self {
-            data,
+            data: Some(data),
             bin: Vec::new(),
             payload_count,
         }
     }
 
     /// Create a binary packet from outgoing data and a payload
-    pub fn outgoing(data: Value, bin: Vec<Vec<u8>>) -> Self {
+    pub fn outgoing(data: Option<Value>, bin: Vec<Vec<u8>>) -> Self {
         let mut data = match data {
-            Value::Array(v) => Value::Array(v),
-            d => Value::Array(vec![d]),
+            Some(Value::Array(v)) => Value::Array(v),
+            Some(d) => Value::Array(vec![d]),
+            None => Value::Array(vec![]),
         };
         let payload_count = bin.len();
         (0..payload_count).for_each(|i| {
@@ -279,8 +280,9 @@ impl BinaryPacket {
                 "num": i
             }))
         });
+
         Self {
-            data,
+            data: Some(data),
             bin,
             payload_count,
         }
@@ -309,20 +311,30 @@ impl<'a> TryInto<String> for Packet<'a> {
             Event(e, data, _) | BinaryEvent(e, BinaryPacket { data, .. }, _) => {
                 // Expand the packet if it is an array with data -> ["event", ...data]
                 let packet = match data {
-                    Value::Array(ref mut v) if !v.is_empty() => {
+                    Some(Value::Array(ref mut v)) if !v.is_empty() => {
                         v.insert(0, Value::String((*e).to_string()));
                         serde_json::to_string(&v)
                     }
-                    Value::Array(_) => serde_json::to_string::<(_, [(); 0])>(&(e, [])),
-                    _ => serde_json::to_string(&(e, data)),
+                    Some(Value::Array(_)) => serde_json::to_string::<(_, [(); 0])>(&(e, [])),
+                    Some(_) => serde_json::to_string(&(e, data)),
+                    None => serde_json::to_string(&vec![e]),
                 }?;
                 Some(packet)
             }
-            EventAck(data, _) | BinaryAck(BinaryPacket { data, .. }, _) => {
+            EventAck(data, _) => {
                 // Enforce that the packet is an array -> [data]
                 let packet = match data {
                     Value::Array(_) => serde_json::to_string(&data),
                     Value::Null => Ok("[]".to_string()),
+                    _ => serde_json::to_string(&[data]),
+                }?;
+                Some(packet)
+            }
+            BinaryAck(BinaryPacket { data, .. }, _) => {
+                // Enforce that the packet is an array -> [data]
+                let packet = match data {
+                    Some(Value::Array(_)) => serde_json::to_string(&data),
+                    Some(Value::Null) | None => Ok("[]".to_string()),
                     _ => serde_json::to_string(&[data]),
                 }?;
                 Some(packet)
@@ -489,7 +501,7 @@ impl<'a> TryFrom<String> for Packet<'a> {
             b'1' => PacketData::Disconnect,
             b'2' => {
                 let (event, payload) = deserialize_event_packet(data)?;
-                PacketData::Event(event.into(), payload, ack)
+                PacketData::Event(event.into(), Some(payload), ack)
             }
             b'3' => {
                 let packet = deserialize_packet(data)?.ok_or(Error::InvalidPacketType)?;
@@ -586,7 +598,7 @@ mod test {
         let packet = Packet::try_from(payload).unwrap();
 
         assert_eq!(
-            Packet::event("/", "event", json!([{"data": "value"}])),
+            Packet::event("/", "event", Some(json!([{"data": "value"}]))),
             packet
         );
 
@@ -594,7 +606,7 @@ mod test {
         let payload = format!("21{}", json!(["event", { "data": "value" }]));
         let packet = Packet::try_from(payload).unwrap();
 
-        let mut comparison_packet = Packet::event("/", "event", json!([{"data": "value"}]));
+        let mut comparison_packet = Packet::event("/", "event", Some(json!([{"data": "value"}])));
         comparison_packet.inner.set_ack_id(1);
         assert_eq!(packet, comparison_packet);
 
@@ -603,7 +615,7 @@ mod test {
         let packet = Packet::try_from(payload).unwrap();
 
         assert_eq!(
-            Packet::event("/admin™", "event", json!([{"data": "value™"}])),
+            Packet::event("/admin™", "event", Some(json!([{"data": "value™"}]))),
             packet
         );
 
@@ -612,7 +624,7 @@ mod test {
         let mut packet = Packet::try_from(payload).unwrap();
         packet.inner.set_ack_id(1);
 
-        let mut comparison_packet = Packet::event("/admin™", "event", json!([{"data": "value™"}]));
+        let mut comparison_packet = Packet::event("/admin™", "event", Some(json!([{"data": "value™"}])));
         comparison_packet.inner.set_ack_id(1);
 
         assert_eq!(packet, comparison_packet);
@@ -621,7 +633,7 @@ mod test {
     #[test]
     fn packet_encode_event() {
         let payload = format!("2{}", json!(["event", { "data": "value™" }]));
-        let packet: String = Packet::event("/", "event", json!({ "data": "value™" }))
+        let packet: String = Packet::event("/", "event", Some(json!({ "data": "value™" })))
             .try_into()
             .unwrap();
 
@@ -629,13 +641,19 @@ mod test {
 
         // Encode empty data
         let payload = format!("2{}", json!(["event", []]));
-        let packet: String = Packet::event("/", "event", json!([])).try_into().unwrap();
+        let packet: String = Packet::event("/", "event", Some(json!([]))).try_into().unwrap();
+
+        assert_eq!(packet, payload);
+
+        // Encode empty data
+        let payload = format!("2{}", json!(["event"]));
+        let packet: String = Packet::event("/", "event", None).try_into().unwrap();
 
         assert_eq!(packet, payload);
 
         // Encode with ack ID
         let payload = format!("21{}", json!(["event", { "data": "value™" }]));
-        let mut packet = Packet::event("/", "event", json!({ "data": "value™" }));
+        let mut packet = Packet::event("/", "event", Some(json!({ "data": "value™" })));
         packet.inner.set_ack_id(1);
         let packet: String = packet.try_into().unwrap();
 
@@ -643,7 +661,7 @@ mod test {
 
         // Encode with NS
         let payload = format!("2/admin™,{}", json!(["event", { "data": "value™" }]));
-        let packet: String = Packet::event("/admin™", "event", json!({"data": "value™"}))
+        let packet: String = Packet::event("/admin™", "event", Some(json!({"data": "value™"})))
             .try_into()
             .unwrap();
 
@@ -651,7 +669,7 @@ mod test {
 
         // Encode with NS and ack ID
         let payload = format!("2/admin™,1{}", json!(["event", { "data": "value™" }]));
-        let mut packet = Packet::event("/admin™", "event", json!([{"data": "value™"}]));
+        let mut packet = Packet::event("/admin™", "event", Some(json!([{"data": "value™"}])));
         packet.inner.set_ack_id(1);
         let packet: String = packet.try_into().unwrap();
         assert_eq!(packet, payload);
@@ -702,7 +720,23 @@ mod test {
 
         let payload = format!("51-{}", json);
         let packet: String =
-            Packet::bin_event("/", "event", json!({ "data": "value™" }), vec![vec![1]])
+            Packet::bin_event("/", "event", Some(json!({ "data": "value™" })), vec![vec![1]])
+                .try_into()
+                .unwrap();
+
+        assert_eq!(packet, payload);
+
+        let payload = format!("51-{}", json!(["event", { "_placeholder": true, "num": 0}]));
+        let packet: String =
+            Packet::bin_event("/", "event", None, vec![vec![1]])
+                .try_into()
+                .unwrap();
+
+        assert_eq!(packet, payload);
+
+        let payload = format!("51-{}", json!(["event", { "_placeholder": true, "num": 0}]));
+        let packet: String =
+            Packet::bin_event("/", "event", Some(().into()), vec![vec![1]])
                 .try_into()
                 .unwrap();
 
@@ -711,7 +745,7 @@ mod test {
         // Encode with ack ID
         let payload = format!("51-254{}", json);
         let mut packet =
-            Packet::bin_event("/", "event", json!({ "data": "value™" }), vec![vec![1]]);
+            Packet::bin_event("/", "event", Some(json!({ "data": "value™" })), vec![vec![1]]);
         packet.inner.set_ack_id(254);
         let packet: String = packet.try_into().unwrap();
 
@@ -722,7 +756,7 @@ mod test {
         let packet: String = Packet::bin_event(
             "/admin™",
             "event",
-            json!([{"data": "value™"}]),
+            Some(json!([{"data": "value™"}])),
             vec![vec![1]],
         )
         .try_into()
@@ -735,7 +769,7 @@ mod test {
         let mut packet = Packet::bin_event(
             "/admin™",
             "event",
-            json!([{"data": "value™"}]),
+            Some(json!([{"data": "value™"}])),
             vec![vec![1]],
         );
         packet.inner.set_ack_id(254);
@@ -751,7 +785,7 @@ mod test {
                 "event".into(),
                 BinaryPacket {
                     bin: vec![vec![1]],
-                    data: json!([{"data": "value™"}]),
+                    data: Some(json!([{"data": "value™"}])),
                     payload_count: 1,
                 },
                 ack,
@@ -827,7 +861,7 @@ mod test {
             inner: PacketData::BinaryAck(
                 BinaryPacket {
                     bin: vec![vec![1]],
-                    data: json!([{"data": "value™"}]),
+                    data: Some(json!([{"data": "value™"}])),
                     payload_count: 1,
                 },
                 ack,
@@ -874,10 +908,10 @@ mod test {
         let packet = Packet::disconnect("/admin");
         assert_eq!(packet.get_size_hint(), 8);
 
-        let packet = Packet::event("/", "event", json!({ "data": "value™" }));
+        let packet = Packet::event("/", "event", Some(json!({ "data": "value™" })));
         assert_eq!(packet.get_size_hint(), 1);
 
-        let packet = Packet::event("/admin", "event", json!({ "data": "value™" }));
+        let packet = Packet::event("/admin", "event", Some(json!({ "data": "value™" })));
         assert_eq!(packet.get_size_hint(), 8);
 
         let packet = Packet::ack("/", json!("data"), 54);
@@ -886,13 +920,13 @@ mod test {
         let packet = Packet::ack("/admin", json!("data"), 54);
         assert_eq!(packet.get_size_hint(), 10);
 
-        let packet = Packet::bin_event("/", "event", json!({ "data": "value™" }), vec![vec![1]]);
+        let packet = Packet::bin_event("/", "event", Some(json!({ "data": "value™" })), vec![vec![1]]);
         assert_eq!(packet.get_size_hint(), 3);
 
         let packet = Packet::bin_event(
             "/admin",
             "event",
-            json!({ "data": "value™" }),
+            Some(json!({ "data": "value™" })),
             vec![vec![1]],
         );
         assert_eq!(packet.get_size_hint(), 10);

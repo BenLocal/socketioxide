@@ -409,10 +409,10 @@ impl<A: Adapter> Operators<A> {
         let ns = self.ns.path.clone();
         let data = serde_json::to_value(data)?;
         let packet = if self.binary.is_empty() {
-            Packet::event(ns, event.into(), data)
+            Packet::event(ns, event.into(), Some(data))
         } else {
             let binary = std::mem::take(&mut self.binary);
-            Packet::bin_event(ns, event.into(), data, binary)
+            Packet::bin_event(ns, event.into(), Some(data), binary)
         };
         Ok(packet)
     }
